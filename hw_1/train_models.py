@@ -12,7 +12,6 @@ from catboost import CatBoostClassifier
 
 # LightGBM и XGBoost
 import lightgbm as lgb
-import xgboost as xgb
 
 def load_data(path_train='train.json', path_test='test.json'):
     """Загрузка train и test данных"""
