@@ -7,7 +7,7 @@ REM Проверяем текущую версию Python
 python --version
 
 REM Указываем путь к Python и запускаем Streamlit
-python -m streamlit run app.py --server.port 8501
+python -m streamlit run moduls/app.py --server.port 8501
 
 REM Выводим инструкцию после запуска
 echo.
