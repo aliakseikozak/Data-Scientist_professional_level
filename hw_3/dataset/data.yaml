@@ -1,0 +1,6 @@
+train: ../dataset/train/images
+val: ../dataset/valid/images
+test: ../dataset/test/images
+
+nc: 3
+names: ['Football', 'Player', 'Referee']
