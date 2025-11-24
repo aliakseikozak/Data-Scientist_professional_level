@@ -1,0 +1,18 @@
+names:
+- Player team left
+- Player team right
+- Goalkeeper team left
+- Goalkeeper team right
+- Ball
+- Main referee
+- Side referee
+- Staff members
+nc: 8
+roboflow:
+  license: CC BY 4.0
+  project: teamsrefgkball-xrdyu
+  version: 5
+  workspace: mohamed-badreldin-cp2tc
+test: test/images
+train: train/images
+val: val/images
