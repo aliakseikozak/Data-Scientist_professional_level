@@ -65,21 +65,78 @@ def apply_vignette(img: Image.Image) -> Image.Image:
     
     img.putalpha(mask)
     return img.convert("RGB")
-    
-def is_grayscale(img: Image.Image) -> bool:
+
+def is_grayscale_tolerant(img: Image.Image, threshold=0.07) -> bool:
     """
-    Определение является ли изображение черно-белым
-    Проверка 1: 2D массив (уже ЧБ)
-    Проверка 2: Все каналы RGB одинаковые
+    УЛУЧШЕННАЯ ПРОВЕРКА ЧЕРНО-БЕЛОГО ИЗОБРАЖЕНИЯ
+    ============================================
+    Толерантная проверка с учетом:
+    - старых/состаренных фото с легким оттенком
+    - минимального цветового шума от сканирования
+    - небольших цветовых вариаций
+    
+    Args:
+        img: PIL Image
+        threshold: максимальная допустимая разница между каналами (0-1)
+                  0.07 = 7% разницы, оптимально для старых фото
+    
+    Returns:
+        True если изображение можно считать черно-белым
     """
     img_np = np.array(img)
+    
+    # Случай 1: уже 2D массив (один канал) - точно ЧБ
     if img_np.ndim == 2:
-        return True  # уже ЧБ (1 канал)
-    elif img_np.shape[2] == 3:
-        r, g, b = img_np[:,:,0], img_np[:,:,1], img_np[:,:,2]
-        if np.all(r == g) and np.all(g == b):
-            return True  # ЧБ в RGB (все каналы одинаковые)
+        return True
+    
+    # Случай 2: 3D массив (RGB или RGBA)
+    elif img_np.ndim == 3:
+        # Если RGBA, берем только RGB каналы
+        if img_np.shape[2] == 4:
+            img_np = img_np[:, :, :3]
+        
+        if img_np.shape[2] == 3:
+            r, g, b = img_np[:,:,0], img_np[:,:,1], img_np[:,:,2]
+            
+            # Вычисляем среднюю разницу между каналами
+            diff_rg = np.abs(r - g).mean() / 255.0
+            diff_gb = np.abs(g - b).mean() / 255.0
+            diff_br = np.abs(b - r).mean() / 255.0
+            
+            # Максимальная разница между любыми двумя каналами
+            max_diff = max(diff_rg, diff_gb, diff_br)
+            
+            # Дополнительная проверка: если изображение очень темное/светлое
+            avg_brightness = img_np.mean() / 255.0
+            
+            # Логи для отладки (можно удалить после тестирования)
+            # print(f"Max channel difference: {max_diff:.3f}")
+            # print(f"Average brightness: {avg_brightness:.3f}")
+            
+            # Если разница меньше порога, считаем ЧБ
+            return max_diff < threshold
+    
     return False
+
+def normalize_grayscale_image(img: Image.Image) -> Image.Image:
+    """
+    Нормализация потенциально ЧБ изображений
+    Убирает легкие цветовые оттенки, делая фото чисто черно-белым
+    """
+    # Если уже в режиме 'L' (grayscale)
+    if img.mode == 'L':
+        return img.convert('RGB')
+    
+    # Конвертируем в градации серого и обратно в RGB
+    gray = img.convert('L')
+    return gray.convert('RGB')
+
+def is_grayscale(img: Image.Image) -> bool:
+    """
+    СТАРАЯ ВЕРСИЯ (оставлена для обратной совместимости)
+    Использует новую толерантную проверку
+    """
+    return is_grayscale_tolerant(img, threshold=0.07)
 
 def process(img_np: np.ndarray, style: str) -> np.ndarray:
     """
@@ -94,14 +151,20 @@ def process(img_np: np.ndarray, style: str) -> np.ndarray:
     
     Алгоритм:
     1. Конвертация в PIL Image
-    2. Определение ЧБ/цветное
+    2. Определение ЧБ/цветное (УЛУЧШЕННАЯ ПРОВЕРКА)
     3. Предобработка (раскраска ЧБ если нужно)
     4. Применение стиля
     5. Возврат результата
     """
     # Конвертация в PIL Image
     pil_img = Image.fromarray((img_np * 255).astype(np.uint8))
-    is_gray = is_grayscale(pil_img)
+    
+    # УЛУЧШЕННАЯ ПРОВЕРКА на черно-белое
+    is_gray = is_grayscale_tolerant(pil_img, threshold=0.07)
+    
+    # Дополнительно: если определили как ЧБ, нормализуем изображение
+    if is_gray:
+        pil_img = normalize_grayscale_image(pil_img)
     
     # Стили, которые требуют предварительной раскраски ЧБ фото
     styles_needing_color = ["Советские", "90-е", "Ретро (50-80)"]
