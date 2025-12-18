@@ -1,0 +1,10 @@
+{
+  "categories": {
+    "bug": true,
+    "complaint": true,
+    "praise": true,
+    "suggestion": false,
+    "question": true
+  },
+  "enabled": false
+}

@@ -39,6 +39,7 @@ if not os.path.exists("config.env"):
 
 # Импортируем модули проекта
 from utils.pipeline import process, STYLE_MAP
+from utils.feedback_analyzer import feedback_analyzer
 
 # =============== КОНФИГУРАЦИЯ ===============
 """
@@ -435,6 +436,65 @@ def create_user_stats_text():
             result += f"  • {more_than_10} пользователей сделали более 10 фото\n"
     
     return result
+    
+@dp.message_handler(lambda m: m.text == "✅ Включить уведомления" and m.from_user.id == ADMIN_ID)
+async def enable_all_notifications(msg: types.Message):
+    """Включить ВСЕ категории уведомлений"""
+    settings = feedback_analyzer.notification_settings
+    
+    # Включаем ВСЕ категории
+    for category in settings["categories"]:
+        settings["categories"][category] = True
+    
+    feedback_analyzer.save_settings()
+    
+    await msg.answer("✅ Все категории уведомлений включены!",
+                    reply_markup=notifications_menu())
+
+@dp.message_handler(lambda m: m.text == "🔕 Выключить уведомления" and m.from_user.id == ADMIN_ID)
+async def disable_all_notifications(msg: types.Message):
+    """Выключить ВСЕ категории уведомлений"""
+    settings = feedback_analyzer.notification_settings
+    
+    # Выключаем ВСЕ категории
+    for category in settings["categories"]:
+        settings["categories"][category] = False
+    
+    feedback_analyzer.save_settings()
+    
+    await msg.answer("🔕 Все категории уведомлений выключены!",
+                    reply_markup=notifications_menu())
+                    
+async def send_admin_notification(bot, user_id, feedback_text, analysis):
+    """Отправляет уведомление админу о критичном отзыве"""
+    try:
+        # Проверяем только категорию (общего статуса больше нет)
+        category = analysis["main_category"]
+        
+        # Получаем настройки категории напрямую
+        category_settings = feedback_analyzer.notification_settings.get("categories", {})
+        
+        if not category_settings.get(category, False):
+            log_action(f"Уведомление НЕ отправлено: категория {category} выключена")
+            return
+        
+        # Форматируем сообщение
+        notification = feedback_analyzer.format_notification_message(
+            user_id, feedback_text, analysis
+        )
+        
+        # Отправляем
+        await bot.send_message(
+            chat_id=ADMIN_ID,
+            text=notification,
+            parse_mode="Markdown"
+        )
+        
+        log_action(f"Уведомление отправлено: {category} от пользователя {user_id}")
+        
+    except Exception as e:
+        print(f"Ошибка при отправке уведомления: {e}")
+        log_action(f"Notification error: {e}")
 
 @dp.message_handler(commands=["stats"])
 async def quick_stats(msg: types.Message):
@@ -461,6 +521,71 @@ async def quick_stats(msg: types.Message):
         stats_text += f"🏆 Популярный стиль: {top_style[0]} ({top_style[1]} фото)\n"
     
     await msg.answer(stats_text)
+    
+@dp.message_handler(commands=["feedback_stats"])
+async def show_feedback_stats(msg: types.Message):
+    """Показать статистику отзывов"""
+    if msg.from_user.id != ADMIN_ID:
+        await msg.answer("⛔ Доступно только администратору")
+        return
+    
+    stats_text = feedback_analyzer.get_stats_summary()
+    await msg.answer(stats_text, parse_mode="Markdown")
+
+@dp.message_handler(commands=["feedback_insights"])
+async def show_feedback_insights(msg: types.Message):
+    """Показать инсайты из отзывов"""
+    if msg.from_user.id != ADMIN_ID:
+        await msg.answer("⛔ Доступно только администратору")
+        return
+    
+    insights = feedback_analyzer.get_insights()
+    
+    text = "🔍 *Инсайты из отзывов:*\n\n"
+    text += insights
+    
+    await msg.answer(text, parse_mode="Markdown")
+
+@dp.message_handler(commands=["latest_feedback"])
+async def show_latest_feedback(msg: types.Message):
+    """Показать последние отзывы с анализом"""
+    if msg.from_user.id != ADMIN_ID:
+        await msg.answer("⛔ Доступно только администратору")
+        return
+    
+    if not os.path.exists(FEEDBACK_FILE):
+        await msg.answer("Отзывов пока нет.")
+        return
+    
+    with open(FEEDBACK_FILE, "r", encoding="utf-8") as f:
+        lines = f.readlines()[-10:]  # Последние 10 отзывов
+    
+    if not lines:
+        await msg.answer("Отзывов пока нет.")
+        return
+    
+    text = "📝 *Последние отзывы:*\n\n"
+    
+    for i, line in enumerate(lines, 1):
+        if "||" in line:
+            parts = line.strip().split("||")
+            if len(parts) >= 3:
+                timestamp = parts[0][:16]  # Берем дату и время
+                user_id = parts[1]
+                feedback = parts[2]
+                
+                # Анализируем отзыв
+                analysis = feedback_analyzer.analyze_feedback(feedback)
+                
+                # Обрезаем длинный текст
+                short_feedback = feedback[:50] + "..." if len(feedback) > 50 else feedback
+                
+                text += f"{analysis['emoji']} *{analysis['main_category'].upper()}* "
+                text += f"(уверенность: {analysis['confidence']*100:.0f}%)\n"
+                text += f"👤 User {user_id} | 📅 {timestamp}\n"
+                text += f"💬 \"{short_feedback}\"\n\n"
+    
+    await msg.answer(text, parse_mode="Markdown")
 
 def read_feedback(last_n=50):
     """
@@ -546,15 +671,52 @@ def feedback_menu():
     return kb
 
 def admin_menu():
-    """Админ-панель с опциями статистики"""
+    """Админ-панель с опциями статистики и управления"""
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(
         KeyboardButton("📊 Статистика фото"),
         KeyboardButton("👥 Статистика пользователей"),
         KeyboardButton("📈 Детальная статистика"),
+        KeyboardButton("📝 Анализ отзывов"), 
         KeyboardButton("📄 Все отзывы"),
+        KeyboardButton("🔔 Управление уведомлениями"), 
         KeyboardButton("⬅️ Назад")
     )
+    return kb
+    
+def notifications_menu():
+    """Меню управления уведомлениями"""
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    kb.add(
+        KeyboardButton("🔔 Статус уведомлений"),
+        KeyboardButton("✅ Включить уведомления"),
+        KeyboardButton("🔕 Выключить уведомления"),
+        KeyboardButton("📋 Категории уведомлений"),
+        KeyboardButton("📝 Тестовое уведомление"),
+        KeyboardButton("⬅️ Назад в админ")
+    )
+    return kb
+    
+def categories_menu():
+    """Меню управления категориями уведомлений (БЕЗ кнопок включения/выключения)"""
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    
+    # Только кнопки категорий
+    categories = [
+        "🐛 Баги (bug)",
+        "❌ Жалобы (complaint)", 
+        "✅ Похвалы (praise)",
+        "💡 Предложения (suggestion)",
+        "❓ Вопросы (question)"
+    ]
+    
+    # Добавляем каждую категорию отдельной кнопкой
+    for category in categories:
+        kb.add(KeyboardButton(category))
+    
+    # УБИРАЕМ "Включить все категории" и "Выключить все категории"
+    # Оставляем только кнопку назад
+    kb.add(KeyboardButton("⬅️ Назад в уведомления"))
     return kb
 
 def stats_period_menu():
@@ -621,6 +783,344 @@ async def admin_panel(msg: types.Message):
     if msg.from_user.id != ADMIN_ID:
         await msg.answer("⛔ Доступ запрещен")
         return
+    user_mode[msg.from_user.id] = "admin"
+    await msg.answer("Админ-панель:", reply_markup=admin_menu())
+    
+@dp.message_handler(lambda m: m.text == "📝 Анализ отзывов" and m.from_user.id == ADMIN_ID)
+async def show_feedback_analysis(msg: types.Message):
+    # Показываем меню анализа
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    kb.add(
+        KeyboardButton("📊 Статистика отзывов"),
+        KeyboardButton("🔍 Инсайты"),
+        KeyboardButton("📋 Последние отзывы"),
+        KeyboardButton("⬅️ Назад в админ")
+    )
+    
+    await msg.answer("Выберите тип анализа отзывов:", reply_markup=kb)
+
+@dp.message_handler(lambda m: m.text == "📊 Статистика отзывов" and m.from_user.id == ADMIN_ID)
+async def show_feedback_stats_btn(msg: types.Message):
+    await show_feedback_stats(msg)
+
+@dp.message_handler(lambda m: m.text == "🔍 Инсайты" and m.from_user.id == ADMIN_ID)
+async def show_feedback_insights_btn(msg: types.Message):
+    await show_feedback_insights(msg)
+
+@dp.message_handler(lambda m: m.text == "📋 Последние отзывы" and m.from_user.id == ADMIN_ID)
+async def show_latest_feedback_btn(msg: types.Message):
+    await show_latest_feedback(msg)
+
+# ---------- УПРАВЛЕНИЕ УВЕДОМЛЕНИЯМИ ----------
+@dp.message_handler(commands=["test_notify"])
+async def test_notification_cmd(msg: types.Message):
+    """Тест уведомления"""
+    if msg.from_user.id != ADMIN_ID:
+        return
+    
+    # Тестовые данные
+    test_feedback = "ТЕСТ: Какой максимальный размер фото поддерживается?"
+    test_analysis = feedback_analyzer.analyze_feedback(test_feedback, msg.from_user.id)
+    
+    # Показываем анализ
+    debug_info = f"""
+🔍 *ТЕСТ УВЕДОМЛЕНИЯ*
+
+📝 Текст: {test_feedback}
+🏷️ Категория: {test_analysis['main_category']} ({test_analysis['emoji']})
+📊 Уверенность: {test_analysis['confidence']*100:.0f}%
+
+⚙️ *ПРОВЕРКИ:*
+2. Категория '{test_analysis['main_category']}' включена: {feedback_analyzer.is_category_enabled(test_analysis['main_category'])}
+3. Кулдаун пройден: {feedback_analyzer.should_send_notification(msg.from_user.id, test_feedback)}
+    """
+    
+    await msg.answer(debug_info, parse_mode="Markdown")
+    
+    # Пробуем отправить
+    await send_admin_notification(bot, msg.from_user.id, test_feedback, test_analysis)
+    
+    await msg.answer("✅ Тест завершен. Проверьте, пришло ли уведомление.")
+    
+@dp.message_handler(lambda m: m.text == "🔔 Управление уведомлениями" and m.from_user.id == ADMIN_ID)
+async def show_notifications_menu(msg: types.Message):
+    """Показ меню управления уведомлениями"""
+    await msg.answer("Управление уведомлениями:", reply_markup=notifications_menu())
+
+@dp.message_handler(lambda m: m.text == "🔔 Статус уведомлений" and m.from_user.id == ADMIN_ID)
+async def show_notification_status(msg: types.Message):
+    """Показать статус уведомлений"""
+    settings = feedback_analyzer.notification_settings
+    categories = settings.get("categories", {})
+    
+    text = "🔔 *СТАТУС УВЕДОМЛЕНИЙ*\n\n"
+    
+    # Проверяем состояние
+    all_enabled = all(categories.values()) if categories else False
+    all_disabled = not any(categories.values()) if categories else True
+    
+    if all_enabled:
+        text += "📢 Все уведомления: ✅ ВКЛЮЧЕНЫ\n\n"
+    elif all_disabled:
+        text += "📢 Все уведомления: 🔕 ВЫКЛЮЧЕНЫ\n\n"
+    else:
+        text += "📢 Все уведомления: ⚙️ ЧАСТИЧНО ВКЛЮЧЕНЫ\n\n"
+    
+    text += "📋 Состояние категорий:\n"
+    
+    category_names = {
+        "bug": "🐛 Баги",
+        "complaint": "❌ Жалобы", 
+        "praise": "✅ Похвалы",
+        "suggestion": "💡 Предложения",
+        "question": "❓ Вопросы"
+    }
+    
+    # Показываем состояние каждой категории
+    enabled_count = 0
+    for category_id, name in category_names.items():
+        enabled = categories.get(category_id, False)
+        status = "✅ ВКЛ" if enabled else "🔕 ВЫКЛ"
+        text += f"{status} {name}\n"
+        if enabled:
+            enabled_count += 1
+    
+    total_categories = len(categories)
+    text += f"\n📊 Включено категорий: {enabled_count}/{total_categories}"
+    
+    if enabled_count == 0:
+        text += "\n⚠️ Никакие уведомления не будут приходить"
+    elif enabled_count == total_categories:
+        text += "\n✅ Будут приходить все уведомления"
+    else:
+        text += f"\n⚙️ Будут приходить только выбранные уведомления"
+    
+    text += "\n\nДля изменения используйте меню ниже 👇"
+    
+    await msg.answer(text, parse_mode="Markdown", reply_markup=notifications_menu())
+
+@dp.message_handler(lambda m: m.text == "✅ Включить уведомления" and m.from_user.id == ADMIN_ID)
+async def enable_notifications_btn(msg: types.Message):
+    """Включить общие уведомления (БЕЗ автоматического включения категорий)"""
+    settings = feedback_analyzer.notification_settings
+    
+    # Включаем только общий флаг
+    #settings["enabled"] = True
+    
+    # НЕ включаем категории автоматически!
+    # Они остаются такими, какими были настроены ранее
+    
+    feedback_analyzer.save_settings()
+    
+    await msg.answer("✅ Общие уведомления включены!\n"
+                    "Теперь включите нужные категории отдельно.",
+                    reply_markup=notifications_menu())
+
+@dp.message_handler(lambda m: m.text == "🔕 Выключить уведомления" and m.from_user.id == ADMIN_ID)
+async def disable_notifications_btn(msg: types.Message):
+    """Выключить все уведомления через кнопку в основном меню"""
+    settings = feedback_analyzer.notification_settings
+    
+    # 1. Выключаем общий флаг
+    #settings["enabled"] = False
+    
+    # 2. Выключать категории НЕ нужно - они будут игнорироваться если общий флаг выключен
+    # Но можно оставить как есть или выключить их тоже
+    # for category in settings["categories"]:
+    #     settings["categories"][category] = False
+    
+    feedback_analyzer.save_settings()
+    
+    await msg.answer("🔕 Все уведомления выключены!\n"
+                    "Это отключает ВСЕ уведомления, независимо от настроек категорий.",
+                    reply_markup=notifications_menu())
+
+@dp.message_handler(lambda m: m.text == "📋 Категории уведомлений" and m.from_user.id == ADMIN_ID)
+async def manage_categories(msg: types.Message):
+    """Управление категориями уведомлений"""
+    settings = feedback_analyzer.notification_settings
+    categories = settings.get("categories", {})
+    
+    text = "📋 *УПРАВЛЕНИЕ КАТЕГОРИЯМИ УВЕДОМЛЕНИЙ*\n\n"
+    
+    # Показываем общую статистику
+    enabled_count = sum(1 for enabled in categories.values() if enabled)
+    total_categories = len(categories)
+    
+    if enabled_count == 0:
+        text += "📢 Статус: 🔕 ВСЕ ВЫКЛЮЧЕНЫ\n\n"
+    elif enabled_count == total_categories:
+        text += "📢 Статус: ✅ ВСЕ ВКЛЮЧЕНЫ\n\n"
+    else:
+        text += f"📢 Статус: ⚙️ {enabled_count}/{total_categories} включено\n\n"
+    
+    text += "Текущее состояние:\n"
+    
+    category_status = {
+        "bug": "🐛 Баги",
+        "complaint": "❌ Жалобы", 
+        "praise": "✅ Похвалы",
+        "suggestion": "💡 Предложения",
+        "question": "❓ Вопросы"
+    }
+    
+    # Показываем реальный статус категорий
+    for category_id, name in category_status.items():
+        enabled = categories.get(category_id, False)
+        status = "✅ ВКЛ" if enabled else "🔕 ВЫКЛ"
+        text += f"{status} {name}\n"
+    
+    text += "\nНажмите на категорию, чтобы переключить её состояние 👇"
+    
+    await msg.answer(text, parse_mode="Markdown", reply_markup=categories_menu())
+
+async def send_test_notification_force(bot, user_id):
+    """Принудительно отправить тестовое уведомление"""
+    try:
+        test_feedback = "🐛 ТЕСТ: Проверка работы уведомлений от админ-панели"
+        
+        # Создаем принудительный анализ как BUG
+        test_analysis = {
+            "main_category": "bug",
+            "confidence": 1.0,
+            "emoji": "🐛"
+        }
+        
+        # Форматируем сообщение напрямую
+        from datetime import datetime
+        current_time = datetime.now().strftime("%H:%M:%S")
+        
+        notification = f"""
+🐛 *ТЕСТОВОЕ УВЕДОМЛЕНИЕ*
+
+👤 Пользователь: `{user_id}`
+📊 Категория: BUG (ТЕСТ)
+🕒 Время: {current_time}
+📈 Уверенность: 100%
+
+💬 Текст:
+{test_feedback}
+        """
+        
+        # Отправляем напрямую, минуя все проверки
+        await bot.send_message(
+            chat_id=ADMIN_ID,
+            text=notification,
+            parse_mode="Markdown"
+        )
+        
+        return True
+    except Exception as e:
+        print(f"Ошибка отправки тестового уведомления: {e}")
+        return False
+
+@dp.message_handler(lambda m: m.text == "📝 Тестовое уведомление" and m.from_user.id == ADMIN_ID)
+async def send_test_notification(msg: types.Message):
+    """Отправить тестовое уведомление"""
+    try:
+        success = await send_test_notification_force(bot, msg.from_user.id)
+        if success:
+            await msg.answer("✅ Тестовое уведомление отправлено! Проверьте личные сообщения от бота.", 
+                            reply_markup=notifications_menu())
+        else:
+            await msg.answer("❌ Ошибка отправки тестового уведомления.", 
+                            reply_markup=notifications_menu())
+    except Exception as e:
+        await msg.answer(f"❌ Ошибка: {str(e)}", reply_markup=notifications_menu())
+
+@dp.message_handler(lambda m: m.text == "🐛 Баги (bug)" and m.from_user.id == ADMIN_ID)
+async def toggle_bug_notifications(msg: types.Message):
+    """Переключить уведомления о багах"""
+    settings = feedback_analyzer.notification_settings
+    
+    # УБЕРИТЕ эту проверку - разрешаем менять всегда
+    # if not settings["enabled"]:
+    #     await msg.answer("⚠️ Сначала включите уведомления в основном меню!", 
+    #                     reply_markup=notifications_menu())
+    #     return
+    
+    current = settings["categories"]["bug"]
+    settings["categories"]["bug"] = not current
+    feedback_analyzer.save_settings()
+    
+    status = "✅ ВКЛЮЧЕНЫ" if not current else "🔕 ВЫКЛЮЧЕНЫ"
+    await msg.answer(f"Уведомления о багах {status}", reply_markup=categories_menu())
+
+@dp.message_handler(lambda m: m.text == "❌ Жалобы (complaint)" and m.from_user.id == ADMIN_ID)
+async def toggle_complaint_notifications(msg: types.Message):
+    """Переключить уведомления о жалобах"""
+    settings = feedback_analyzer.notification_settings
+
+    current = feedback_analyzer.notification_settings["categories"]["complaint"]
+    feedback_analyzer.notification_settings["categories"]["complaint"] = not current
+    feedback_analyzer.save_settings()
+    
+    status = "✅ ВКЛЮЧЕНЫ" if not current else "🔕 ВЫКЛЮЧЕНЫ"
+    await msg.answer(f"Уведомления о жалобах {status}", reply_markup=categories_menu())
+
+@dp.message_handler(lambda m: m.text == "✅ Похвалы (praise)" and m.from_user.id == ADMIN_ID)
+async def toggle_praise_notifications(msg: types.Message):
+    """Переключить уведомления о похвалах"""
+    settings = feedback_analyzer.notification_settings
+    
+    current = feedback_analyzer.notification_settings["categories"]["praise"]
+    feedback_analyzer.notification_settings["categories"]["praise"] = not current
+    feedback_analyzer.save_settings()
+    
+    status = "✅ ВКЛЮЧЕНЫ" if not current else "🔕 ВЫКЛЮЧЕНЫ"
+    await msg.answer(f"Уведомления о похвалах {status}", reply_markup=categories_menu())
+
+@dp.message_handler(lambda m: m.text == "💡 Предложения (suggestion)" and m.from_user.id == ADMIN_ID)
+async def toggle_suggestion_notifications(msg: types.Message):
+    """Переключить уведомления о предложениях"""
+    settings = feedback_analyzer.notification_settings
+
+    current = feedback_analyzer.notification_settings["categories"]["suggestion"]
+    feedback_analyzer.notification_settings["categories"]["suggestion"] = not current
+    feedback_analyzer.save_settings()
+    
+    status = "✅ ВКЛЮЧЕНЫ" if not current else "🔕 ВЫКЛЮЧЕНЫ"
+    await msg.answer(f"Уведомления о предложениях {status}", reply_markup=categories_menu())
+
+@dp.message_handler(lambda m: m.text == "❓ Вопросы (question)" and m.from_user.id == ADMIN_ID)
+async def toggle_question_notifications(msg: types.Message):
+    """Переключить уведомления о вопросах"""
+    settings = feedback_analyzer.notification_settings
+
+    current = feedback_analyzer.notification_settings["categories"]["question"]
+    feedback_analyzer.notification_settings["categories"]["question"] = not current
+    feedback_analyzer.save_settings()
+    
+    status = "✅ ВКЛЮЧЕНЫ" if not current else "🔕 ВЫКЛЮЧЕНЫ"
+    await msg.answer(f"Уведомления о вопросах {status}", reply_markup=categories_menu())
+'''
+@dp.message_handler(lambda m: m.text == "✅ Включить все категории" and m.from_user.id == ADMIN_ID)
+async def enable_all_categories(msg: types.Message):
+    """Включить все категории уведомлений"""
+    for category in feedback_analyzer.notification_settings["categories"]:
+        feedback_analyzer.notification_settings["categories"][category] = True
+    feedback_analyzer.save_settings()
+    
+    await msg.answer("✅ Все категории уведомлений включены!", reply_markup=categories_menu())
+
+@dp.message_handler(lambda m: m.text == "🔕 Выключить все категории" and m.from_user.id == ADMIN_ID)
+async def disable_all_categories(msg: types.Message):
+    """Выключить все категории уведомлений"""
+    for category in feedback_analyzer.notification_settings["categories"]:
+        feedback_analyzer.notification_settings["categories"][category] = False
+    feedback_analyzer.save_settings()
+    
+    await msg.answer("🔕 Все категории уведомлений выключены!", reply_markup=categories_menu())
+'''
+# ---------- КНОПКИ ВОЗВРАТА ----------
+@dp.message_handler(lambda m: m.text == "⬅️ Назад в уведомления" and m.from_user.id == ADMIN_ID)
+async def back_to_notifications(msg: types.Message):
+    """Вернуться в меню уведомлений"""
+    await msg.answer("Управление уведомлениями:", reply_markup=notifications_menu())
+
+@dp.message_handler(lambda m: m.text == "⬅️ Назад в админ" and m.from_user.id == ADMIN_ID)
+async def back_to_admin_from_notifications(msg: types.Message):
+    """Вернуться в админ-панель из меню уведомлений"""
     user_mode[msg.from_user.id] = "admin"
     await msg.answer("Админ-панель:", reply_markup=admin_menu())
 
@@ -952,22 +1452,130 @@ async def view_my_feedback(msg: types.Message):
 
 @dp.message_handler(lambda m: user_mode.get(m.from_user.id) == "feedback_typing")
 async def save_user_feedback(msg: types.Message):
-    """
-    Сохранение отзыва пользователя
-    Проверка минимальной длины и возврат в меню
-    """
     if not msg.text or len(msg.text.strip()) < 5:
         await msg.answer("❌ Отзыв слишком короткий. Минимум 5 символов.")
-        # Остаемся в режиме набора отзыва
         return
     
-    # Сохранение отзыва
-    save_feedback(msg.from_user.id, msg.text.strip())
+    feedback_text = msg.text.strip()
+    user_id = msg.from_user.id
     
-    # Возврат в меню обратной связи
-    user_mode[msg.from_user.id] = "feedback_menu"
-    await msg.answer("✅ Отзыв сохранён! Спасибо за обратную связь!", reply_markup=feedback_menu())
+    # 1. АНАЛИЗИРУЕМ отзыв
+    analysis = feedback_analyzer.analyze_feedback(feedback_text, user_id)
+    category = analysis["main_category"]  # Получаем категорию
+    
+    # 2. ОТПРАВЛЯЕМ УВЕДОМЛЕНИЕ (НЕ проверяем is_critical_feedback!)
+    # Используем НОВЫЙ метод с category
+    if feedback_analyzer.should_send_notification(category, user_id, feedback_text):
+        await send_admin_notification(bot, user_id, feedback_text, analysis)
+    
+    # 3. СОХРАНЯЕМ отзыв
+    save_feedback(user_id, feedback_text)
+    
+    # 4. УЧИМ модель на этом отзыве
+    feedback_analyzer.learn_from_feedback(feedback_text, user_id, category)
+    
+    # 5. ВОЗВРАЩАЕМ в меню обратной связи
+    user_mode[user_id] = "feedback_menu"
+    
+    # 6. ПОКАЗЫВАЕМ результат пользователю
+    category_names = {
+        "bug": "сообщение об ошибке",
+        "praise": "благодарность", 
+        "complaint": "жалоба",
+        "suggestion": "предложение",
+        "question": "вопрос",
+        "unknown": "отзыв"
+    }
+    
+    response = f"{analysis['emoji']} *Отзыв сохранён!*\n\n"
+    response += f"Определено как: **{category_names.get(category, 'отзыв')}**\n"
+    
+    if analysis['confidence'] > 0:
+        response += f"Уверенность анализа: {analysis['confidence']*100:.0f}%\n\n"
+    
+    # Разные ответы для разных категорий
+    if category == "bug":
+        response += "🐛 Спасибо за сообщение об ошибке! Мы уже получили уведомление и скоро всё починим."
+    elif category == "complaint":
+        response += "❌ Сожалеем о проблеме! Мы уже изучаем вашу жалобу."
+    elif category == "praise":
+        response += "✅ Спасибо за добрые слова! Рады, что вам нравится!"
+    elif category == "suggestion":
+        response += "💡 Отличное предложение! Мы его рассмотрим."
+    elif category == "question":
+        response += "❓ Спасибо за вопрос! Мы постараемся ответить."
+    else:
+        response += "📝 Спасибо за обратную связь!"
+    
+    # Всегда показываем приоритет (так как is_critical_feedback теперь всегда True)
+    response += "\n\n⚡ Ваш отзыв был отмечен как приоритетный!"
+    
+    await msg.answer(response, parse_mode="Markdown", reply_markup=feedback_menu())
 
+
+@dp.message_handler(commands=["notify_settings"])
+async def notification_settings(msg: types.Message):
+    """Настройки уведомлений (только для админа)"""
+    if msg.from_user.id != ADMIN_ID:
+        await msg.answer("⛔ Доступно только администратору")
+        return
+    
+    settings = feedback_analyzer.notification_settings
+    
+    settings_text = f"""
+🔔 *Настройки уведомлений*
+
+*Общий статус:* {'✅ ВКЛЮЧЕНЫ' if settings['enabled'] else '🔕 ВЫКЛЮЧЕНЫ'}
+
+*Категории:*
+"""
+    
+    for category, enabled in settings["categories"].items():
+        status = "✅" if enabled else "❌"
+        category_names = {
+            "bug": "🐛 Баги",
+            "complaint": "❌ Жалобы", 
+            "praise": "✅ Похвалы",
+            "suggestion": "💡 Предложения",
+            "question": "❓ Вопросы"
+        }
+        name = category_names.get(category, category)
+        settings_text += f"{status} {name}\n"
+    
+    settings_text += """
+
+*Команды управления:*
+/notify_status - Текущий статус
+/notify_test - Тестовое уведомление
+"""
+    
+    await msg.answer(settings_text, parse_mode="Markdown")
+
+@dp.message_handler(commands=["notify_status"])
+async def notification_status(msg: types.Message):
+    """Статус уведомлений"""
+    if msg.from_user.id != ADMIN_ID:
+        return
+    
+    settings = feedback_analyzer.notification_settings
+    
+    text = "🔔 *Статус уведомлений*\n\n"
+    text += f"📢 Общий статус: {'✅ ВКЛЮЧЕНЫ' if settings['enabled'] else '🔕 ВЫКЛЮЧЕНЫ'}\n\n"
+    text += "📋 Категории:\n"
+    
+    for category, enabled in settings["categories"].items():
+        emoji = "✅" if enabled else "❌"
+        text += f"{emoji} {category}: {'вкл' if enabled else 'выкл'}\n"
+    
+    await msg.answer(text, parse_mode="Markdown")
+    
+
+@dp.message_handler(commands=["notify_test"])
+async def test_notification_cmd(msg: types.Message):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    await send_test_notification(msg)
+    
 # ---------- АДМИН: ПРОСМОТР ВСЕХ ОТЗЫВОВ ----------
 @dp.message_handler(lambda m: m.text == "📄 Все отзывы" and m.from_user.id == ADMIN_ID)
 async def view_all_feedback(msg: types.Message):
